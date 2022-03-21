@@ -118,7 +118,7 @@
 use crate::codec::{Codec, UserError};
 use crate::frame::{self, Pseudo, PushPromiseHeaderError, Reason, Settings, StreamId};
 use crate::proto::{self, Config, Error, Prioritized};
-use crate::{FlowControl, PingPong, RecvStream, SendStream};
+use crate::{FlowControl, GoAwayRecv, PingPong, RecvStream, SendStream};
 
 use bytes::{Buf, Bytes};
 use http::{HeaderMap, Method, Request, Response};
@@ -547,6 +547,15 @@ where
     /// This may only be called once. Calling multiple times will return `None`.
     pub fn ping_pong(&mut self) -> Option<PingPong> {
         self.connection.take_user_pings().map(PingPong::new)
+    }
+
+    /// Takes a `GoAwayRecv` instance from the connection.
+    ///
+    /// # Note
+    ///
+    /// This may only be called once. Calling multiple times will return `None`.
+    pub fn go_away_recv(&mut self) -> Option<GoAwayRecv> {
+        self.connection.take_go_away_recv().map(GoAwayRecv::new)
     }
 
     /// Returns the maximum number of concurrent streams that may be initiated

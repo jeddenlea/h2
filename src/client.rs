@@ -139,7 +139,7 @@ use crate::codec::{Codec, SendError, UserError};
 use crate::ext::Protocol;
 use crate::frame::{Headers, Pseudo, Reason, Settings, StreamId};
 use crate::proto::{self, Error};
-use crate::{FlowControl, PingPong, RecvStream, SendStream};
+use crate::{FlowControl, GoAwayRecv, PingPong, RecvStream, SendStream};
 
 use bytes::{Buf, Bytes};
 use http::{uri, HeaderMap, Method, Request, Response, Version};
@@ -1275,6 +1275,15 @@ where
         self.inner.take_user_pings().map(PingPong::new)
     }
 
+    /// Takes a `GoAwayRecv` instance from the connection.
+    ///
+    /// # Note
+    ///
+    /// This may only be called once. Calling multiple times will return `None`.
+    pub fn go_away_recv(&mut self) -> Option<GoAwayRecv> {
+        self.inner.take_go_away_recv().map(GoAwayRecv::new)
+    }
+
     /// Returns the maximum number of concurrent streams that may be initiated
     /// by this client.
     ///
@@ -1287,6 +1296,7 @@ where
     pub fn max_concurrent_send_streams(&self) -> usize {
         self.inner.max_send_streams()
     }
+
     /// Returns the maximum number of concurrent streams that may be initiated
     /// by the server on this connection.
     ///

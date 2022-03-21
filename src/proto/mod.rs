@@ -1,6 +1,7 @@
 mod connection;
 mod error;
 mod go_away;
+mod go_away_recv;
 mod peer;
 mod ping_pong;
 mod settings;
@@ -8,6 +9,7 @@ mod streams;
 
 pub(crate) use self::connection::{Config, Connection};
 pub use self::error::{Error, Initiator};
+pub(crate) use self::go_away_recv::{GoAwayRecv, GoAwayRecvConnHandle};
 pub(crate) use self::peer::{Dyn as DynPeer, Peer};
 pub(crate) use self::ping_pong::UserPings;
 pub(crate) use self::streams::{DynStreams, OpaqueStreamRef, StreamRef, Streams};

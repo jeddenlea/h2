@@ -1,5 +1,5 @@
 use crate::codec::UserError;
-use crate::frame::Reason;
+use crate::frame::{self, Reason};
 use crate::proto::{self, WindowSize};
 
 use bytes::{Buf, Bytes};
@@ -7,7 +7,8 @@ use http::HeaderMap;
 
 use crate::PollExt;
 use std::fmt;
-#[cfg(feature = "stream")]
+use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -210,6 +211,41 @@ pub struct Ping {
 /// [`Ping`]: struct.Ping.html
 pub struct Pong {
     _p: (),
+}
+
+/// A handle to receive GOAWAY frames ([`GoAway`]) as they're received from the peer.
+///
+/// If a GoAwayRecv has been taken from a session, it must be actively polled concurrently with the
+/// session's Connection.
+// NOT Clone on purpose
+#[derive(Debug)]
+pub struct GoAwayRecv {
+    inner: proto::GoAwayRecv,
+}
+
+/// TODO
+#[derive(Clone)]
+pub struct GoAway {
+    inner: frame::GoAway,
+}
+
+/// `BlockingGoAway` is what is returned from a [`GoAwayRecv`][] when a `Connection` (client or
+/// server) receives a GOAWAY frame from its peer.
+///
+/// While a `BlockingGoAway` exists, the `Connection` from which it came will remain pending. This
+/// is to allow for any necessary book keeping to be done without worrying about racing with
+/// further state changes from subsequent frames.
+///
+/// [`GoAwayRecv`]: struct.GoAwayRecv.html
+// NOT Clone on purpose
+pub struct BlockingGoAway {
+    inner: GoAway,
+    _unblock: UnblockGoAwayRecv,
+}
+
+// NOT Clone on purpose
+struct UnblockGoAwayRecv {
+    handle: proto::GoAwayRecv,
 }
 
 // ===== impl SendStream =====
@@ -585,5 +621,120 @@ impl fmt::Debug for Ping {
 impl fmt::Debug for Pong {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("Pong").finish()
+    }
+}
+
+// ===== impl GoAwayRecv =====
+
+impl GoAwayRecv {
+    pub(crate) fn new(recv: proto::GoAwayRecv) -> Self {
+        Self { inner: recv }
+    }
+
+    /// TODO
+    pub fn poll_go_away(&mut self, cx: &mut Context) -> Poll<Option<BlockingGoAway>> {
+        match ready!(self.inner.poll_go_away(cx)) {
+            Some(go_away) => Poll::Ready(Some(BlockingGoAway::new(go_away, &self.inner))),
+            None => Poll::Ready(None),
+        }
+    }
+}
+
+impl Future for GoAwayRecv {
+    type Output = Option<BlockingGoAway>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        Pin::into_inner(self).poll_go_away(cx)
+    }
+}
+
+#[cfg(feature = "stream")]
+impl futures_core::Stream for GoAwayRecv {
+    type Item = BlockingGoAway;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::into_inner(self).poll_go_away(cx)
+    }
+}
+
+// ===== impl GoAway =====
+
+impl GoAway {
+    /// The "Last-Stream-ID" from the GOAWAY frame.
+    #[inline]
+    pub fn last_stream_id(&self) -> StreamId {
+        StreamId::from_internal(self.inner.last_stream_id())
+    }
+
+    /// The Error Code from the GOAWAY frame.
+    #[inline]
+    pub fn error_code(&self) -> Reason {
+        self.inner.reason()
+    }
+
+    /// The Additional Debug Data, if any, from the GOAWAY frame.
+    #[inline]
+    pub fn debug_data(&self) -> Option<&Bytes> {
+        let debug_data = self.inner.debug_data();
+        if debug_data.is_empty() {
+            None
+        } else {
+            Some(debug_data)
+        }
+    }
+}
+
+impl fmt::Debug for GoAway {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut out = f.debug_struct("GoAway");
+        out.field("last_stream_id", &self.last_stream_id());
+        out.field("error_code", &self.error_code());
+        if let Some(debug_data) = self.debug_data() {
+            out.field("debug_data", debug_data);
+        }
+        out.finish()
+    }
+}
+
+// ===== impl BlockingGoAway =====
+
+impl BlockingGoAway {
+    fn new(inner: frame::GoAway, handle: &proto::GoAwayRecv) -> Self {
+        let inner = GoAway { inner };
+        let _unblock = UnblockGoAwayRecv {
+            handle: handle.clone(),
+        };
+        BlockingGoAway { inner, _unblock }
+    }
+
+    /// Unblock the source Connection, returning the GOAWAY frame.
+    #[inline]
+    pub fn unblock(self) -> GoAway {
+        self.inner
+    }
+}
+
+impl Deref for BlockingGoAway {
+    type Target = GoAway;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl fmt::Debug for BlockingGoAway {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("BlockingGoAway")
+            .field(&self.inner)
+            .field(&format_args!("..."))
+            .finish()
+    }
+}
+
+// ===== impl UnblockGoAwayRecv =====
+
+impl Drop for UnblockGoAwayRecv {
+    fn drop(&mut self) {
+        self.handle.wake_conn();
     }
 }

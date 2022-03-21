@@ -54,6 +54,9 @@ where
     /// Stream state handler
     streams: Streams<B, P>,
 
+    /// TODO
+    go_away_recv: Option<GoAwayRecvConnHandle>,
+
     /// A `tracing` span tracking the lifetime of the connection.
     span: tracing::Span,
 
@@ -133,6 +136,7 @@ where
                 error: None,
                 go_away: GoAway::new(),
                 ping_pong: PingPong::new(),
+                go_away_recv: None,
                 settings: Settings::new(config.settings),
                 streams,
                 span: tracing::debug_span!("Connection", peer = %P::NAME),
@@ -239,6 +243,16 @@ where
         self.inner.ping_pong.take_user_pings()
     }
 
+    pub(crate) fn take_go_away_recv(&mut self) -> Option<GoAwayRecv> {
+        if self.inner.go_away_recv.is_none() {
+            let (user, conn) = GoAwayRecv::new();
+            self.inner.go_away_recv = Some(conn);
+            Some(user)
+        } else {
+            None
+        }
+    }
+
     /// Advances the internal state of the connection.
     pub fn poll(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
         // XXX(eliza): cloning the span is unfortunately necessary here in
@@ -325,11 +339,8 @@ where
             }
             ready!(self.poll_ready(cx))?;
 
-            match self
-                .inner
-                .as_dyn()
-                .recv_frame(ready!(Pin::new(&mut self.codec).poll_next(cx)?))?
-            {
+            let next_frame = ready!(self.poll_next_frame(cx)?);
+            match self.inner.as_dyn().recv_frame(next_frame)? {
                 ReceivedFrame::Settings(frame) => {
                     self.inner.settings.recv_settings(
                         frame,
@@ -342,6 +353,33 @@ where
                     return Poll::Ready(Ok(()));
                 }
             }
+        }
+    }
+
+    fn poll_next_frame(&mut self, cx: &mut Context) -> Poll<Option<Result<Frame, Error>>> {
+        // GOAWAY frames may need to be handled by the user before the Connection.  In general, any
+        // number of frame types may require special handling. Therefore, this should be replaced
+        // by something more general!
+        if let Some(ref mut go_away_recv) = self.inner.go_away_recv {
+            if let Some(go_away) = ready!(go_away_recv.poll_conn_ready(cx)) {
+                Poll::Ready(Some(Ok(frame::Frame::GoAway(go_away))))
+            } else {
+                match Pin::new(&mut self.codec).poll_next(cx) {
+                    Poll::Ready(Some(Ok(Frame::GoAway(go_away)))) => {
+                        go_away_recv.recv(go_away);
+                        // After handing the GOAWAY frame off to the GoAwayRecv, the Connection has
+                        // little to do but wait for it to be given back. We thus must check
+                        // immediately if it is ready, with the expectation that the call will
+                        // simply return Pending.
+                        go_away_recv.poll_conn_ready(cx).map(|maybe_frame| {
+                            maybe_frame.map(|go_away| Ok(Frame::GoAway(go_away)))
+                        })
+                    }
+                    poll => poll,
+                }
+            }
+        } else {
+            Pin::new(&mut self.codec).poll_next(cx)
         }
     }
 
@@ -458,7 +496,7 @@ where
     }
 
     fn recv_frame(&mut self, frame: Option<Frame>) -> Result<ReceivedFrame, Error> {
-        use crate::frame::Frame::*;
+        use Frame::*;
         match frame {
             Some(Headers(frame)) => {
                 tracing::trace!(?frame, "recv HEADERS");
